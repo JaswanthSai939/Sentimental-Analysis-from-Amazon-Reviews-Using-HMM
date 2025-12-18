@@ -1,0 +1,262 @@
+1.
+import nltk
+
+# Download the 'punkt_tab' resource using NLTK Downloader
+nltk.download('punkt_tab')
+
+
+
+2.
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import pickle
+
+# Download necessary NLTK resources
+nltk.download('punkt')
+nltk.download('wordnet')
+nltk.download('stopwords')
+
+# Load dataset
+data = pd.read_csv('/content/reviews_Grocery_and_Gourmet_Food_5.csv')
+data = data[['reviewText', 'overall']].dropna()
+
+# Define mapping for labels
+rating_to_label = {
+    1: 'negative',
+    2: 'negative',
+    3: 'neutral',
+    4: 'positive',
+    5: 'positive'
+}
+data['label'] = data['overall'].map(rating_to_label)
+
+
+
+3.
+# Updated preprocessing function
+def preprocess_text_advanced(text):
+    # Step 1: Handle negations
+    text = handle_negations_scope(text)
+
+    # Step 2: Tokenize, remove stopwords, and lemmatize
+    tokens = word_tokenize(text)
+    tokens = [word for word in tokens if word not in stop_words]  # Remove stopwords, keep tokens with underscores
+    tokens = [lemmatizer.lemmatize(word) for word in tokens]
+    return tokens
+
+# Test the preprocessing again
+user_input = "The product is not good and not worth the price."
+processed_text = handle_negations_scope(user_input)
+processed_tokens = preprocess_text_advanced(processed_text)
+print(f"Processed Text after Negation Handling: {processed_text}")
+print(f"Processed Tokens: {processed_tokens}")
+
+
+
+4.
+# Preprocess dataset
+train_data['tokens'] = train_data['reviewText'].apply(preprocess_text_advanced)
+test_data['tokens'] = test_data['reviewText'].apply(preprocess_text_advanced)
+
+# Create vocabulary and word-to-index mapping
+all_tokens = [token for tokens in train_data['tokens'] for token in tokens]
+vocab = list(set(all_tokens))
+word_to_index = {word: i for i, word in enumerate(vocab)}
+
+# Add OOV token
+word_to_index["<OOV>"] = len(word_to_index)
+n_observations = len(word_to_index)
+
+
+
+5.
+# Define state mapping
+state_mapping = {'positive': 0, 'neutral': 1, 'negative': 2}
+n_states = len(state_mapping)
+
+# Encode tokens and states
+def encode_tokens(tokens):
+    return [word_to_index.get(token, word_to_index["<OOV>"]) for token in tokens]
+
+encoded_train_sequences = [encode_tokens(tokens) for tokens in train_data['tokens']]
+encoded_state_sequences = [[state_mapping[label]] for label in train_data['label']]
+
+# Bigram HMM Implementation
+class BigramHMM:
+    def __init__(self, n_states, n_observations):
+        self.n_states = n_states
+        self.n_observations = n_observations
+        self.transition_probs = np.full((n_states, n_states), 1.0 / n_states)  # Bigram transitions
+        self.emission_probs = np.full((n_states, n_observations), 1.0 / n_observations)
+        self.start_probs = np.full(n_states, 1.0 / n_states)
+
+    def train(self, sequences, state_sequences, alpha=1.0):
+        # Update start probabilities
+        for state_seq in state_sequences:
+            self.start_probs[state_seq[0]] += 1
+        self.start_probs += alpha
+        self.start_probs /= self.start_probs.sum()
+
+        # Update bigram transition probabilities
+        for state_seq in state_sequences:
+            for i in range(len(state_seq) - 1):
+                self.transition_probs[state_seq[i], state_seq[i + 1]] += 1
+        self.transition_probs += alpha
+        self.transition_probs /= self.transition_probs.sum(axis=1, keepdims=True)
+
+        # Update emission probabilities
+        for seq, state_seq in zip(sequences, state_sequences):
+            for obs, state in zip(seq, state_seq):
+                self.emission_probs[state, obs] += 1
+        self.emission_probs += alpha
+        self.emission_probs /= self.emission_probs.sum(axis=1, keepdims=True)
+
+    def viterbi(self, sequence):
+        T = len(sequence)
+        viterbi_probs = np.zeros((self.n_states, T))
+        backpointer = np.zeros((self.n_states, T), dtype=int)
+
+        # Initialize base case
+        for s in range(self.n_states):
+            viterbi_probs[s, 0] = self.start_probs[s] * self.emission_probs[s, sequence[0]]
+            backpointer[s, 0] = 0
+
+        # Dynamic programming
+        for t in range(1, T):
+            for s in range(self.n_states):
+                probabilities = viterbi_probs[:, t - 1] * self.transition_probs[:, s] * self.emission_probs[s, sequence[t]]
+                viterbi_probs[s, t] = np.max(probabilities)
+                backpointer[s, t] = np.argmax(probabilities)
+
+        # Backtrack to find the best path
+        best_path = np.zeros(T, dtype=int)
+        best_path[-1] = np.argmax(viterbi_probs[:, T - 1])
+        for t in range(T - 2, -1, -1):
+            best_path[t] = backpointer[best_path[t + 1], t + 1]
+
+        return best_path
+
+
+
+6.
+# Train the Bigram HMM model
+bigram_hmm_model = BigramHMM(n_states=n_states, n_observations=n_observations)
+bigram_hmm_model.train(encoded_train_sequences, encoded_state_sequences, alpha=1.0)
+
+# Save the model to a file for later use
+with open('bigram_hmm_model.pkl', 'wb') as model_file:
+    pickle.dump({'model': bigram_hmm_model, 'vocab': vocab, 'word_to_index': word_to_index, 'state_mapping': state_mapping}, model_file)
+
+print("Model training completed and saved successfully.")
+
+
+
+7.
+# Evaluate the model on the test dataset
+encoded_test_sequences = [encode_tokens(tokens) for tokens in test_data['tokens']]
+true_labels = [state_mapping[label] for label in test_data['label']]
+predicted_labels = []
+
+for seq in encoded_test_sequences:
+    if len(seq) > 0:
+        predicted_state = bigram_hmm_model.viterbi(seq)[0]
+    else:
+        predicted_state = state_mapping['neutral']  # Default to 'neutral' if the sequence is empty
+    predicted_labels.append(predicted_state)
+
+# Calculate evaluation metrics
+accuracy = accuracy_score(true_labels, predicted_labels)
+precision = precision_score(true_labels, predicted_labels, average='weighted')
+recall = recall_score(true_labels, predicted_labels, average='weighted')
+f1 = f1_score(true_labels, predicted_labels, average='weighted')
+
+print(f"Accuracy: {accuracy:.2f}")
+print(f"Precision: {precision:.2f}")
+print(f"Recall: {recall:.2f}")
+print(f"F1 Score: {f1:.2f}")
+
+8.
+# Make sure the negative class is adequately represented in the balanced training set
+negative_count = len(balanced_train_data[balanced_train_data['label'] == 'negative'])
+if negative_count < 0.3 * len(balanced_train_data):
+    # Augment negative reviews to increase representation
+    additional_negative_data = negative_data.sample(int(0.3 * len(balanced_train_data)) - negative_count, replace=True, random_state=42)
+    balanced_train_data = pd.concat([balanced_train_data, additional_negative_data])
+
+# Re-process tokens for the updated balanced dataset
+balanced_train_data['tokens'] = balanced_train_data['reviewText'].apply(preprocess_text_advanced)
+
+# Encode tokens and states for the updated balanced data
+encoded_train_sequences = [encode_tokens(tokens) for tokens in balanced_train_data['tokens']]
+encoded_state_sequences = [[state_mapping[label]] for label in balanced_train_data['label']]
+
+
+
+9.
+# Retrain the Bigram HMM model with higher alpha for smoothing
+bigram_hmm_model = BigramHMM(n_states=n_states, n_observations=n_observations)
+bigram_hmm_model.train(encoded_train_sequences, encoded_state_sequences, alpha=10.0)  # Increase smoothing to 10
+
+# Save the retrained model
+with open('bigram_hmm_model_augmented.pkl', 'wb') as model_file:
+    pickle.dump({'model': bigram_hmm_model, 'vocab': vocab, 'word_to_index': word_to_index, 'state_mapping': state_mapping}, model_file)
+
+print("Retrained the model with augmented data and increased smoothing.")
+
+
+
+10.
+# Predict sentiment using the retrained model
+def predict_review_bigram_augmented(text):
+    # Load the saved balanced and augmented model
+    with open('bigram_hmm_model_augmented.pkl', 'rb') as model_file:
+        data = pickle.load(model_file)
+        bigram_hmm_model = data['model']
+        word_to_index = data['word_to_index']
+        state_mapping = data['state_mapping']
+
+    # Preprocess and encode the input text
+    preprocessed_text = handle_negations_scope(text)
+    tokens = preprocess_text_advanced(preprocessed_text)
+    encoded_sequence = [word_to_index.get(token, word_to_index["<OOV>"]) for token in tokens]
+
+    # Predict the most likely state sequence
+    if len(encoded_sequence) == 0:
+        return "Unknown (not enough information)"
+
+    predicted_states = bigram_hmm_model.viterbi(encoded_sequence)
+    predicted_label = [k for k, v in state_mapping.items() if v == predicted_states[0]][0]
+
+    return predicted_label
+
+# Test multiple inputs again
+test_sentences = [
+    "I am extremely happy with my purchase. Highly recommend it!",
+    "This is by far the best product I've used. Amazing value for money.",
+    "The customer service was fantastic, and the product works perfectly.",
+    "I love it! It does exactly what it says, and the performance is top-notch.",
+
+    # Neutral Reviews
+    "It's neither great nor bad. Just a regular product.",
+    "The quality is decent for the price, but I have used better alternatives.",
+    "The product works, but I wasn't particularly impressed or disappointed.",
+    "The packaging was good, and the delivery was on time, but the product is average.",
+
+    # Negative Reviews
+    "The product is not good and not worth the money.",
+    "I am not happy with the quality at all. Would not recommend.",
+    "The product broke after only a week of use. Very disappointing.",
+    "I expected much better quality. The product feels cheap and flimsy.",
+    "This was a waste of money. It doesn't work as advertised."
+
+]
+
+for sentence in test_sentences:
+    print(f"Input: {sentence}")
+    print(f"Predicted Class: {predict_review_bigram_augmented(sentence)}\n")
